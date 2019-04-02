@@ -38,6 +38,7 @@ import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTask;
 import org.bson.BsonDocument;
+import org.bson.BsonValue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -172,7 +173,15 @@ public class MongoDbSinkTask extends SinkTask {
                 batches = new MongoDbSinkRecordBatches(maxBatchSize,records.size());
                 batchMapping.put(namespace,batches);
             }
-            batches.buffer(r);
+
+            SinkDocument doc = sinkConverter.convert(r);
+            BsonDocument valueDoc = doc.getValueDoc().orElse(null);
+            
+            if(valueDoc != null && validateDoc(valueDoc)){
+                batches.buffer(r);
+            }else{
+                LOGGER.error("skipping sink record "+ r + "for which invalid key was present");
+            }
         });
         return batchMapping;
     }
@@ -183,6 +192,7 @@ public class MongoDbSinkTask extends SinkTask {
         List<WriteModel<BsonDocument>> docsToWrite = new ArrayList<>(records.size());
         LOGGER.debug("building write model for {} record(s)", records.size());
         records.forEach(record -> {
+
                     SinkDocument doc = sinkConverter.convert(record);
                     processorChains.getOrDefault(collectionName,
                             processorChains.get(MongoDbSinkConnectorConfig.TOPIC_AGNOSTIC_KEY_NAME))
@@ -227,6 +237,45 @@ public class MongoDbSinkTask extends SinkTask {
     public void stop() {
         LOGGER.info("stopping MongoDB sink task");
         mongoClient.close();
+    }
+
+    private boolean validateDoc(BsonDocument doc) {
+
+        Iterator<Map.Entry<String, BsonValue>> iter = doc.entrySet().iterator();
+        while(iter.hasNext()) {
+            Map.Entry<String, BsonValue> entry = iter.next();
+            String key = entry.getKey();
+            BsonValue value = entry.getValue();
+
+            if(!validate(key)){
+                return false;
+            }
+
+            if(value instanceof BsonDocument && !validateDoc((BsonDocument)value)) {
+                return false;
+            }
+        }
+
+        return true;
+
+    }
+
+    private boolean validate(final String fieldName) {
+
+        List<String> EXCEPTIONS = Arrays.asList("$db", "$ref", "$id");
+
+        if (fieldName == null) {
+            return false;
+        }
+
+        if (fieldName.contains(".")) {
+            return false;
+        }
+
+        if (fieldName.startsWith("$") && !EXCEPTIONS.contains(fieldName)) {
+            return false;
+        }
+        return true;
     }
 
 }
